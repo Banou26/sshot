@@ -1,0 +1,13 @@
+[package]
+name = "sshot"
+version = "0.1.0"
+edition = "2021"
+description = "Wayland screenshot tool for KDE Plasma / NixOS"
+
+[dependencies]
+ashpd = { version = "0.11", features = ["tokio"] }
+tokio = { version = "1", features = ["full"] }
+chrono = "0.4"
+rand = "0.8"
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
