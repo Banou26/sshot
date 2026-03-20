@@ -28,7 +28,8 @@
 
         buildDeps = with pkgs; [
           dbus
-          openssl
+          wayland
+          libxkbcommon
         ];
       in
       {

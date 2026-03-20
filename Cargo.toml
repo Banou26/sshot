@@ -6,8 +6,9 @@ description = "Wayland screenshot tool for KDE Plasma / NixOS"
 
 [dependencies]
 ashpd = { version = "0.11", features = ["tokio"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 chrono = "0.4"
 rand = "0.8"
-clap = { version = "4", features = ["derive"] }
 image = "0.25"
+winit = "0.30"
+softbuffer = "0.4"
