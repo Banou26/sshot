@@ -1,0 +1,23 @@
+[package]
+name = "sshot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smithay-client-toolkit = "0.19"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow = "1"
+chrono = "0.4"
+rand = "0.8"
+serde_json = "1"
+ksni = { version = "0.3.3", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+dirs = "6"
+signal-hook = "0.4"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
