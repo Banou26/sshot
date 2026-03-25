@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub save: SaveConfig,
     pub appearance: AppearanceConfig,
+    /// Global shortcut key (e.g. "Print", "Meta+Shift+S"). Empty to disable.
+    #[serde(default = "default_shortcut")]
+    pub shortcut: String,
+}
+
+fn default_shortcut() -> String {
+    "Print".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +46,7 @@ impl Default for Config {
         Self {
             save: SaveConfig::default(),
             appearance: AppearanceConfig::default(),
+            shortcut: default_shortcut(),
         }
     }
 }
@@ -76,17 +84,15 @@ impl Config {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        match std::fs::read_to_string(&path) {
+        let config = match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
                 eprintln!("Warning: invalid config at {}: {e}", path.display());
                 Self::default()
             }),
-            Err(_) => {
-                let config = Self::default();
-                config.save_to_disk();
-                config
-            }
-        }
+            Err(_) => Self::default(),
+        };
+        config.save_to_disk(); // Persist any new fields
+        config
     }
 
     pub fn save_to_disk(&self) {

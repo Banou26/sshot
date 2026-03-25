@@ -100,6 +100,63 @@ fn remove_pid() {
     let _ = std::fs::remove_file(pid_path());
 }
 
+// ── KDE Global Shortcut ──────────────────────────────────────────
+
+fn register_shortcut(shortcut: &str) {
+    if shortcut.is_empty() {
+        return;
+    }
+
+    // Install a .desktop file for the trigger action
+    let apps_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+        .join("applications");
+    let _ = std::fs::create_dir_all(&apps_dir);
+
+    let sshot_bin = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sshot".into());
+
+    let desktop = format!(
+        "[Desktop Entry]\n\
+         Name=Screenshot\n\
+         Comment=Take a screenshot\n\
+         Exec={sshot_bin} --trigger\n\
+         Type=Application\n\
+         NoDisplay=true\n"
+    );
+    let desktop_path = apps_dir.join("sshot-trigger.desktop");
+    let _ = std::fs::write(&desktop_path, &desktop);
+
+    // Register the shortcut with KDE kglobalaccel
+    let key_entry = format!("{shortcut},none,Take Screenshot");
+    let _ = Command::new("kwriteconfig6")
+        .args([
+            "--file", "kglobalshortcutsrc",
+            "--group", "sshot-trigger.desktop",
+            "--key", "_launch",
+            &key_entry,
+        ])
+        .status();
+
+    // Reload kglobalaccel
+    let _ = Command::new("dbus-send")
+        .args([
+            "--session", "--type=signal",
+            "--dest=org.kde.kglobalaccel",
+            "/kglobalaccel",
+            "org.kde.KGlobalAccel.yourShortGotChanged",
+        ])
+        .status();
+
+    // Alternative reload via qdbus
+    let _ = Command::new("qdbus")
+        .args(["org.kde.kglobalaccel", "/kglobalaccel", "blockGlobalShortcuts", "false"])
+        .status();
+
+    eprintln!("Shortcut registered: {shortcut}");
+}
+
 // ── Actions ──────────────────────────────────────────────────────
 
 fn take_screenshot(config: &Config) {
@@ -197,6 +254,8 @@ fn main() -> Result<()> {
         }
     });
 
+    register_shortcut(&config.shortcut);
+
     eprintln!("Ready. Use 'sshot --trigger' or system tray to capture.");
 
     // Main event loop
@@ -206,6 +265,7 @@ fn main() -> Result<()> {
             tray::Action::OpenConfig => open_config(),
             tray::Action::ReloadConfig => {
                 config = Config::load();
+                register_shortcut(&config.shortcut);
                 eprintln!("Config reloaded");
             }
             tray::Action::Quit => break,
