@@ -76,6 +76,8 @@ struct OutputSurface {
     normal: Vec<u8>,
     dimmed: Vec<u8>,
     configured: bool,
+    needs_redraw: bool,
+    frame_pending: bool,
 }
 
 // ── Capture ──────────────────────────────────────────────────────
@@ -186,11 +188,12 @@ fn render(
     let len = canvas.len().min(dimmed.len());
     canvas[..len].copy_from_slice(&dimmed[..len]);
 
-    if let Some((hx, hy, hw, hh)) = highlight {
-        let hx = (hx.max(0) as u32).min(width);
-        let hy = (hy.max(0) as u32).min(height);
-        let hx2 = ((hx.max(0) as u32).saturating_add(hw)).min(width);
-        let hy2 = ((hy.max(0) as u32).saturating_add(hh)).min(height);
+    if let Some((hx_raw, hy_raw, hw, hh)) = highlight {
+        // Compute hx2/hy2 from raw coords BEFORE clamping hx/hy (cross-monitor correctness)
+        let hx2 = (hx_raw as i64 + hw as i64).max(0).min(width as i64) as u32;
+        let hy2 = (hy_raw as i64 + hh as i64).max(0).min(height as i64) as u32;
+        let hx = (hx_raw.max(0) as u32).min(width);
+        let hy = (hy_raw.max(0) as u32).min(height);
         if hx >= hx2 || hy >= hy2 { return; }
 
         for y in hy..hy2 {
@@ -302,7 +305,7 @@ impl App {
                 layer, wl_surface: surface, viewport, pool,
                 logical_x: log_x, logical_y: log_y, logical_w: log_w, logical_h: log_h,
                 phys_w, phys_h, scale, ss_offset_x, ss_offset_y,
-                normal, dimmed, configured: false,
+                normal, dimmed, configured: false, needs_redraw: false, frame_pending: false,
             });
         }
     }
@@ -374,10 +377,20 @@ impl App {
         surface.wl_surface.damage_buffer(0, 0, phys_w as i32, phys_h as i32);
         surface.wl_surface.frame(qh, surface.wl_surface.clone());
         surface.wl_surface.commit();
+        surface.needs_redraw = false;
+        surface.frame_pending = true;
     }
 
-    fn redraw_all(&mut self, qh: &QueueHandle<Self>) {
-        for i in 0..self.surfaces.len() { self.draw_surface(i, qh); }
+    /// Mark all surfaces dirty and draw any that aren't waiting for a frame callback.
+    fn request_redraw(&mut self, qh: &QueueHandle<Self>) {
+        for i in 0..self.surfaces.len() {
+            self.surfaces[i].needs_redraw = true;
+        }
+        for i in 0..self.surfaces.len() {
+            if self.surfaces[i].needs_redraw && !self.surfaces[i].frame_pending {
+                self.draw_surface(i, qh);
+            }
+        }
     }
 
     fn handle_selection(&mut self) {
@@ -407,7 +420,10 @@ impl CompositorHandler for App {
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
     fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
         if let Some(idx) = self.surfaces.iter().position(|s| &s.wl_surface == surface) {
-            if self.dragging || self.pressed { self.draw_surface(idx, qh); }
+            self.surfaces[idx].frame_pending = false;
+            if self.surfaces[idx].needs_redraw {
+                self.draw_surface(idx, qh);
+            }
         }
     }
     fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
@@ -459,11 +475,11 @@ impl PointerHandler for App {
                             let dy = self.mouse_global.1 - self.press_global.1;
                             if dx.abs() > DRAG_THRESHOLD || dy.abs() > DRAG_THRESHOLD { self.dragging = true; }
                         }
-                        if self.dragging { self.drag_end = self.mouse_global; self.redraw_all(qh); }
+                        if self.dragging { self.drag_end = self.mouse_global; self.request_redraw(qh); }
                     } else {
                         let old = self.hovered_window;
                         self.hovered_window = self.window_at(self.mouse_global.0, self.mouse_global.1);
-                        if old != self.hovered_window { self.redraw_all(qh); }
+                        if old != self.hovered_window { self.request_redraw(qh); }
                     }
                 }
                 PointerEventKind::Press { button: 272, .. } => {
