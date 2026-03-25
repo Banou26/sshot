@@ -14,6 +14,14 @@ use signal_hook::iterator::Signals;
 use crate::config::Config;
 use crate::overlay::{CaptureResult, Selection};
 
+fn which(name: &str) -> Option<String> {
+    std::env::var("PATH").ok()?
+        .split(':')
+        .map(|dir| PathBuf::from(dir).join(name))
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
 // ── Save & Clipboard ─────────────────────────────────────────────
 
 fn save_and_copy(result: &CaptureResult, config: &Config) -> Result<PathBuf> {
@@ -113,9 +121,8 @@ fn register_shortcut(shortcut: &str) {
         .join("applications");
     let _ = std::fs::create_dir_all(&apps_dir);
 
-    let sshot_bin = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "sshot".into());
+    // Use PATH-based name (works reliably with NixOS where store paths change)
+    let sshot_bin = which("sshot").unwrap_or_else(|| "sshot".into());
 
     let desktop = format!(
         "[Desktop Entry]\n\
@@ -139,17 +146,10 @@ fn register_shortcut(shortcut: &str) {
         ])
         .status();
 
-    // Reload kglobalaccel
-    let _ = Command::new("dbus-send")
-        .args([
-            "--session", "--type=signal",
-            "--dest=org.kde.kglobalaccel",
-            "/kglobalaccel",
-            "org.kde.KGlobalAccel.yourShortGotChanged",
-        ])
+    // Tell kglobalaccel to pick up the change by toggling global shortcuts
+    let _ = Command::new("qdbus")
+        .args(["org.kde.kglobalaccel", "/kglobalaccel", "blockGlobalShortcuts", "true"])
         .status();
-
-    // Alternative reload via qdbus
     let _ = Command::new("qdbus")
         .args(["org.kde.kglobalaccel", "/kglobalaccel", "blockGlobalShortcuts", "false"])
         .status();
