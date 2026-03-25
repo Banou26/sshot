@@ -109,7 +109,10 @@
           config = lib.mkIf cfg.enable {
             home.packages = [ pkg ];
 
-            xdg.configFile."sshot/config.json".text = configJson;
+            xdg.configFile."sshot/config.json" = {
+              text = configJson;
+              force = true;
+            };
 
             xdg.configFile."autostart/sshot.desktop".text = ''
               [Desktop Entry]

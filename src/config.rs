@@ -91,7 +91,10 @@ impl Config {
             }),
             Err(_) => Self::default(),
         };
-        config.save_to_disk(); // Persist any new fields
+        // Only write if not managed by nix (symlink = nix-managed)
+        if !path.is_symlink() {
+            config.save_to_disk();
+        }
         config
     }
 
