@@ -333,6 +333,10 @@ fn main() -> Result<()> {
     for action in &rx {
         match action {
             tray::Action::TakeScreenshot => take_screenshot(&config),
+            tray::Action::OpenFolder => {
+                let dir = config.save_dir().unwrap_or_else(|_| PathBuf::from(&config.save.directory));
+                let _ = Command::new("xdg-open").arg(&dir).spawn();
+            }
             tray::Action::OpenConfig => open_config(),
             tray::Action::ReloadConfig => {
                 config = Config::load();

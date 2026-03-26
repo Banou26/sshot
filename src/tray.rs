@@ -5,6 +5,7 @@ use ksni::blocking::TrayMethods;
 #[derive(Debug, Clone)]
 pub enum Action {
     TakeScreenshot,
+    OpenFolder,
     OpenConfig,
     ReloadConfig,
     Quit,
@@ -39,6 +40,15 @@ impl ksni::Tray for TrayIcon {
                 icon_name: "camera-photo".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.sender.send(Action::TakeScreenshot);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Open Screenshots Folder".into(),
+                icon_name: "folder-pictures".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.sender.send(Action::OpenFolder);
                 }),
                 ..Default::default()
             }
