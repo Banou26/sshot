@@ -5,6 +5,7 @@ use ksni::blocking::TrayMethods;
 #[derive(Debug, Clone)]
 pub enum Action {
     TakeScreenshot,
+    OpenLastScreenshot,
     OpenFolder,
     OpenConfig,
     ReloadConfig,
@@ -29,7 +30,7 @@ impl ksni::Tray for TrayIcon {
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
-        let _ = self.sender.send(Action::TakeScreenshot);
+        let _ = self.sender.send(Action::OpenLastScreenshot);
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {

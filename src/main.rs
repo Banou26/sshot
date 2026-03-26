@@ -23,6 +23,31 @@ fn which(name: &str) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
+/// Recursively find the most recently modified .png file under a directory.
+fn find_latest_file(dir: &std::path::Path) -> Option<PathBuf> {
+    fn walk(dir: &std::path::Path, best: &mut Option<(std::time::SystemTime, PathBuf)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, best);
+            } else if path.extension().map(|e| e == "png").unwrap_or(false) {
+                if let Ok(meta) = path.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if best.as_ref().map(|(t, _)| modified > *t).unwrap_or(true) {
+                            *best = Some((modified, path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut best = None;
+    walk(dir, &mut best);
+    best.map(|(_, p)| p)
+}
+
 // ── Save & Clipboard ─────────────────────────────────────────────
 
 fn save_and_copy(result: &CaptureResult, config: &Config) -> Result<PathBuf> {
@@ -386,6 +411,15 @@ fn main() -> Result<()> {
     for action in &rx {
         match action {
             tray::Action::TakeScreenshot => take_screenshot(&config),
+            tray::Action::OpenLastScreenshot => {
+                let base = Config::expand_path(&config.save.directory);
+                if let Some(latest) = find_latest_file(&base) {
+                    // Dolphin --select opens the folder with the file highlighted
+                    let _ = Command::new("dolphin").arg("--select").arg(&latest).spawn();
+                } else {
+                    let _ = Command::new("xdg-open").arg(&base).spawn();
+                }
+            }
             tray::Action::OpenFolder => {
                 let dir = config.save_dir().unwrap_or_else(|_| PathBuf::from(&config.save.directory));
                 let _ = Command::new("xdg-open").arg(&dir).spawn();

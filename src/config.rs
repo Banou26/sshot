@@ -139,7 +139,7 @@ impl Config {
     }
 
     /// Expand ~ to $HOME in a path string.
-    fn expand_path(path: &str) -> PathBuf {
+    pub fn expand_path(path: &str) -> PathBuf {
         if let Some(rest) = path.strip_prefix("~/") {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
             PathBuf::from(home).join(rest)
