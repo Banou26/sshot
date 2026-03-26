@@ -72,15 +72,18 @@ fn save_and_copy(result: &CaptureResult, config: &Config) -> Result<PathBuf> {
         image::codecs::png::PngEncoder::new(&mut png_buf)
             .write_image(&rgba, pw, ph, image::ColorType::Rgba8.into())?;
 
-        if let Ok(mut child) = Command::new("wl-copy")
+        match Command::new("wl-copy")
             .args(["-t", "image/png"])
             .stdin(std::process::Stdio::piped())
             .spawn()
         {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(&png_buf);
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(&png_buf);
+                }
+                let _ = child.wait();
             }
-            let _ = child.wait();
+            Err(e) => eprintln!("Clipboard failed (wl-copy not found?): {e}"),
         }
     }
 

@@ -31,7 +31,8 @@
         let
           cfg = config.programs.sshot;
           pkg = self.packages.${pkgs.system}.default;
-          configJson = builtins.toJSON {
+          jsonFormat = pkgs.formats.json {};
+          configFile = jsonFormat.generate "config.json" {
             save = {
               directory = cfg.saveDirectory;
               subfolder = cfg.subfolder;
@@ -110,7 +111,7 @@
             home.packages = [ pkg ];
 
             xdg.configFile."sshot/config.json" = {
-              text = configJson;
+              source = configFile;
               force = true;
             };
 

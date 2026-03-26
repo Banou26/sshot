@@ -138,10 +138,23 @@ impl Config {
         format!("{name}.png")
     }
 
+    /// Expand ~ to $HOME in a path string.
+    fn expand_path(path: &str) -> PathBuf {
+        if let Some(rest) = path.strip_prefix("~/") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home).join(rest)
+        } else if path == "~" {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home)
+        } else {
+            PathBuf::from(path)
+        }
+    }
+
     pub fn save_dir(&self) -> Result<PathBuf> {
         let now = chrono::Local::now();
         let subfolder = now.format(&self.save.subfolder).to_string();
-        let dir = PathBuf::from(&self.save.directory).join(subfolder);
+        let dir = Self::expand_path(&self.save.directory).join(subfolder);
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
     }
