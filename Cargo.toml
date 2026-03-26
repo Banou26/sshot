@@ -17,6 +17,8 @@ serde = { version = "1", features = ["derive"] }
 dirs = "6"
 signal-hook = "0.4"
 libc = "0.2"
+zbus = "5.14.0"
+os_pipe = "1.2.3"
 
 [profile.release]
 opt-level = 3

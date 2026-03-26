@@ -1,3 +1,4 @@
+mod capture;
 mod config;
 mod overlay;
 mod tray;
@@ -25,39 +26,68 @@ fn which(name: &str) -> Option<String> {
 // ── Save & Clipboard ─────────────────────────────────────────────
 
 fn save_and_copy(result: &CaptureResult, config: &Config) -> Result<PathBuf> {
-    let (x, y, w, h, title) = match &result.selection {
-        Selection::Window { x, y, w, h, title } => (*x, *y, *w, *h, Some(title.as_str())),
-        Selection::Region { x, y, w, h } => (*x, *y, *w, *h, None),
+    let title = match &result.selection {
+        Selection::Window { title, .. } => Some(title.as_str()),
+        Selection::Region { .. } => None,
     };
 
-    let s = result.scale;
-    let px = (x * s).round() as u32;
-    let py = (y * s).round() as u32;
-    let pw = (w * s).round() as u32;
-    let ph = (h * s).round() as u32;
-    let ss_h = result.ss_data.len() as u32 / result.ss_stride;
+    // For window captures: use KWin CaptureWindow (isolated, no stacking changes)
+    // For region captures: crop from the workspace screenshot
+    let (rgba, pw, ph) = if let Selection::Window { title, .. } = &result.selection {
+        let target_idx = result.windows.iter().position(|w| &w.title == title);
+        let target_id = target_idx
+            .map(|i| result.windows[i].internal_id.clone())
+            .unwrap_or_default();
 
-    let px = px.min(result.ss_width.saturating_sub(1));
-    let py = py.min(ss_h.saturating_sub(1));
-    let pw = pw.min(result.ss_width - px);
-    let ph = ph.min(ss_h - py);
+        let (data, w, h, stride) = capture::capture_window(&target_id)
+            .context("CaptureWindow failed — is sshot.desktop installed with X-KDE-DBUS-Restricted-Interfaces?")?;
 
-    if pw == 0 || ph == 0 { anyhow::bail!("Selection is empty"); }
-
-    // BGRA -> RGBA crop
-    let mut rgba = vec![0u8; (pw * ph * 4) as usize];
-    for row in 0..ph {
-        for col in 0..pw {
-            let si = ((py + row) * result.ss_stride + (px + col) * 4) as usize;
-            let di = ((row * pw + col) * 4) as usize;
-            if si + 3 < result.ss_data.len() {
-                rgba[di] = result.ss_data[si + 2];
-                rgba[di + 1] = result.ss_data[si + 1];
-                rgba[di + 2] = result.ss_data[si];
-                rgba[di + 3] = result.ss_data[si + 3];
+        // Convert BGRA raw → RGBA
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for row in 0..h {
+            for col in 0..w {
+                let si = (row * stride + col * 4) as usize;
+                let di = ((row * w + col) * 4) as usize;
+                if si + 3 < data.len() {
+                    rgba[di] = data[si + 2];
+                    rgba[di + 1] = data[si + 1];
+                    rgba[di + 2] = data[si];
+                    rgba[di + 3] = data[si + 3];
+                }
             }
         }
-    }
+        (rgba, w, h)
+    } else {
+        let Selection::Region { x, y, w, h } = &result.selection else { unreachable!() };
+        let s = result.scale;
+        let px = (x * s).round() as u32;
+        let py = (y * s).round() as u32;
+        let mut pw = (w * s).round() as u32;
+        let mut ph = (h * s).round() as u32;
+        let ss_h = result.ss_data.len() as u32 / result.ss_stride;
+
+        let px = px.min(result.ss_width.saturating_sub(1));
+        let py = py.min(ss_h.saturating_sub(1));
+        pw = pw.min(result.ss_width - px);
+        ph = ph.min(ss_h - py);
+
+        if pw == 0 || ph == 0 { anyhow::bail!("Selection is empty"); }
+
+        let mut rgba = vec![0u8; (pw * ph * 4) as usize];
+        for row in 0..ph {
+            for col in 0..pw {
+                let si = ((py + row) * result.ss_stride + (px + col) * 4) as usize;
+                let di = ((row * pw + col) * 4) as usize;
+                if si + 3 < result.ss_data.len() {
+                    rgba[di] = result.ss_data[si + 2];
+                    rgba[di + 1] = result.ss_data[si + 1];
+                    rgba[di + 2] = result.ss_data[si];
+                    rgba[di + 3] = result.ss_data[si + 3];
+                }
+            }
+        }
+        (rgba, pw, ph)
+    };
 
     // Save file
     let dir = config.save_dir()?;
@@ -233,6 +263,25 @@ fn register_shortcut(shortcut: &str) {
 
 // ── Actions ──────────────────────────────────────────────────────
 
+/// Install a .desktop file that grants this process KWin ScreenShot2 authorization.
+fn install_screenshot_permission() {
+    let apps_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
+        .join("applications");
+    let _ = std::fs::create_dir_all(&apps_dir);
+
+    let sshot_bin = which("sshot").unwrap_or_else(|| "sshot".into());
+    let desktop = format!(
+        "[Desktop Entry]\n\
+         Name=sshot\n\
+         Exec={sshot_bin} --daemon\n\
+         Type=Application\n\
+         NoDisplay=true\n\
+         X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2\n"
+    );
+    let _ = std::fs::write(apps_dir.join("sshot.desktop"), &desktop);
+}
+
 fn take_screenshot(config: &Config) {
     match overlay::run(config) {
         Ok(Some(result)) => {
@@ -241,7 +290,7 @@ fn take_screenshot(config: &Config) {
             }
         }
         Ok(None) => {} // Cancelled
-        Err(e) => eprintln!("Screenshot error: {e}"),
+        Err(e) => eprintln!("Screenshot error: {e:#}"),
     }
 }
 
@@ -305,6 +354,7 @@ fn main() -> Result<()> {
     eprintln!("Screenshot daemon starting. Config: {}", Config::config_path().display());
 
     write_pid();
+    install_screenshot_permission();
 
     let (tx, rx) = mpsc::channel::<tray::Action>();
 

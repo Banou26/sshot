@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,6 +34,7 @@ const DRAG_THRESHOLD: f64 = 5.0;
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
     pub title: String,
+    pub internal_id: String,
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -55,6 +57,8 @@ pub struct CaptureResult {
     pub selection: Selection,
     /// Scale factor (physical / logical).
     pub scale: f64,
+    /// All windows in stacking order (bottom to top).
+    pub windows: Vec<WindowInfo>,
 }
 
 // ── Internal types ───────────────────────────────────────────────
@@ -82,26 +86,6 @@ struct OutputSurface {
 
 // ── Capture ──────────────────────────────────────────────────────
 
-fn capture_workspace() -> Result<(Vec<u8>, u32, u32, u32)> {
-    let tmp = std::env::temp_dir().join(format!("ss_capture_{}.png", std::process::id()));
-    let status = Command::new("spectacle")
-        .args(["-f", "-b", "-n", "-o", tmp.to_str().unwrap()])
-        .status()
-        .context("Failed to run spectacle")?;
-    if !status.success() { anyhow::bail!("spectacle exited with {status}"); }
-    if !tmp.exists() { anyhow::bail!("spectacle did not produce output"); }
-
-    let img = image::open(&tmp).context("Failed to decode screenshot PNG")?;
-    let _ = std::fs::remove_file(&tmp);
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    let stride = width * 4;
-
-    let mut data = rgba.into_raw();
-    for pixel in data.chunks_exact_mut(4) { pixel.swap(0, 2); }
-    Ok((data, width, height, stride))
-}
-
 fn get_windows() -> Result<Vec<WindowInfo>> {
     let token = format!("WD{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
     let script = format!(
@@ -111,7 +95,7 @@ for (var i = 0; i < wins.length; i++) {{
     var w = wins[i];
     if (!w.minimized && w.normalWindow) {{
         var g = w.frameGeometry;
-        out.push(JSON.stringify({{t: w.caption, x: g.x, y: g.y, w: g.width, h: g.height}}));
+        out.push(JSON.stringify({{t: w.caption, id: w.internalId.toString(), x: g.x, y: g.y, w: g.width, h: g.height}}));
     }}
 }}
 console.log("{token}:[" + out.join(",") + "]");"#
@@ -139,6 +123,7 @@ console.log("{token}:[" + out.join(",") + "]");"#
             let arr: Vec<serde_json::Value> = serde_json::from_str(json_str.trim())?;
             return Ok(arr.iter().map(|item| WindowInfo {
                 title: item["t"].as_str().unwrap_or("").to_string(),
+                internal_id: item["id"].as_str().unwrap_or("").to_string(),
                 x: item["x"].as_f64().unwrap_or(0.0), y: item["y"].as_f64().unwrap_or(0.0),
                 width: item["w"].as_f64().unwrap_or(0.0), height: item["h"].as_f64().unwrap_or(0.0),
             }).collect());
@@ -555,7 +540,7 @@ delegate_registry!(App);
 pub fn run(config: &Config) -> Result<Option<CaptureResult>> {
     let win_handle = std::thread::spawn(get_windows);
     let (ss_data, ss_width, _ss_height, ss_stride) =
-        capture_workspace().context("Failed to capture screenshot")?;
+        crate::capture::capture_workspace().context("Failed to capture screenshot")?;
     let windows = win_handle.join()
         .map_err(|_| anyhow::anyhow!("Window list thread panicked"))?
         .context("Failed to get window list")?;
@@ -596,7 +581,7 @@ pub fn run(config: &Config) -> Result<Option<CaptureResult>> {
     match app.selection {
         Some(sel) => Ok(Some(CaptureResult {
             ss_data: app.ss_data, ss_width: app.ss_width, ss_stride: app.ss_stride,
-            selection: sel, scale: app.global_scale,
+            selection: sel, scale: app.global_scale, windows: app.windows,
         })),
         None => Ok(None),
     }
