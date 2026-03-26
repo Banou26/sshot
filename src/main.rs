@@ -110,6 +110,67 @@ fn remove_pid() {
 
 // ── KDE Global Shortcut ──────────────────────────────────────────
 
+/// Convert a shortcut string like "Ctrl+Shift+4" to a Qt key integer.
+/// When Shift is combined with a digit, KDE expects the shifted symbol (e.g. $ not Shift+4).
+fn parse_shortcut_to_qt_key(shortcut: &str) -> Option<i32> {
+    let mut modifiers: i32 = 0;
+    let mut key: i32 = 0;
+    let mut has_shift = false;
+
+    for part in shortcut.split('+') {
+        let part = part.trim();
+        match part.to_lowercase().as_str() {
+            "ctrl" | "control" => modifiers |= 0x04000000,
+            "shift" => { modifiers |= 0x02000000; has_shift = true; }
+            "alt" => modifiers |= 0x08000000,
+            "meta" | "super" => modifiers |= 0x10000000,
+            _ => {
+                key = match part.to_lowercase().as_str() {
+                    "print" | "printscreen" => 0x01000009,
+                    "escape" | "esc" => 0x01000000,
+                    "space" => 0x20,
+                    "tab" => 0x01000001,
+                    "return" | "enter" => 0x01000004,
+                    "backspace" => 0x01000003,
+                    "delete" => 0x01000007,
+                    "f1" => 0x01000030, "f2" => 0x01000031, "f3" => 0x01000032,
+                    "f4" => 0x01000033, "f5" => 0x01000034, "f6" => 0x01000035,
+                    "f7" => 0x01000036, "f8" => 0x01000037, "f9" => 0x01000038,
+                    "f10" => 0x01000039, "f11" => 0x0100003a, "f12" => 0x0100003b,
+                    s if s.len() == 1 => s.chars().next().unwrap().to_ascii_uppercase() as i32,
+                    _ => return None,
+                };
+            }
+        }
+    }
+
+    if key == 0 { return None; }
+
+    // When Shift + digit, KDE expects the shifted symbol instead
+    if has_shift {
+        let shifted = match (key as u8) as char {
+            '1' => Some('!' as i32),
+            '2' => Some('@' as i32),
+            '3' => Some('#' as i32),
+            '4' => Some('$' as i32),
+            '5' => Some('%' as i32),
+            '6' => Some('^' as i32),
+            '7' => Some('&' as i32),
+            '8' => Some('*' as i32),
+            '9' => Some('(' as i32),
+            '0' => Some(')' as i32),
+            _ => None,
+        };
+        if let Some(sym) = shifted {
+            // Replace key with shifted symbol, remove Shift modifier
+            key = sym;
+            modifiers &= !0x02000000;
+        }
+    }
+
+    Some(key | modifiers)
+}
+
 fn register_shortcut(shortcut: &str) {
     if shortcut.is_empty() {
         return;
@@ -121,9 +182,7 @@ fn register_shortcut(shortcut: &str) {
         .join("applications");
     let _ = std::fs::create_dir_all(&apps_dir);
 
-    // Use PATH-based name (works reliably with NixOS where store paths change)
     let sshot_bin = which("sshot").unwrap_or_else(|| "sshot".into());
-
     let desktop = format!(
         "[Desktop Entry]\n\
          Name=Screenshot\n\
@@ -132,10 +191,30 @@ fn register_shortcut(shortcut: &str) {
          Type=Application\n\
          NoDisplay=true\n"
     );
-    let desktop_path = apps_dir.join("sshot-trigger.desktop");
-    let _ = std::fs::write(&desktop_path, &desktop);
+    let _ = std::fs::write(apps_dir.join("sshot-trigger.desktop"), &desktop);
 
-    // Register the shortcut with KDE kglobalaccel
+    // Parse shortcut to Qt key integer
+    let qt_key = match parse_shortcut_to_qt_key(shortcut) {
+        Some(k) => k,
+        None => {
+            eprintln!("Warning: could not parse shortcut '{shortcut}'");
+            return;
+        }
+    };
+
+    // Register via kglobalaccel D-Bus API
+    let _ = Command::new("busctl")
+        .args([
+            "--user", "call",
+            "org.kde.kglobalaccel", "/kglobalaccel",
+            "org.kde.KGlobalAccel", "setForeignShortcut",
+            "asai",
+            "4", "sshot-trigger.desktop", "_launch", "Screenshot", "Take Screenshot",
+            "1", &qt_key.to_string(),
+        ])
+        .output();
+
+    // Also write to config file for persistence across reboots
     let key_entry = format!("{shortcut},none,Take Screenshot");
     let _ = Command::new("kwriteconfig6")
         .args([
@@ -146,15 +225,7 @@ fn register_shortcut(shortcut: &str) {
         ])
         .status();
 
-    // Tell kglobalaccel to pick up the change by toggling global shortcuts
-    let _ = Command::new("qdbus")
-        .args(["org.kde.kglobalaccel", "/kglobalaccel", "blockGlobalShortcuts", "true"])
-        .status();
-    let _ = Command::new("qdbus")
-        .args(["org.kde.kglobalaccel", "/kglobalaccel", "blockGlobalShortcuts", "false"])
-        .status();
-
-    eprintln!("Shortcut registered: {shortcut}");
+    eprintln!("Shortcut registered: {shortcut} (Qt key: 0x{qt_key:08x})");
 }
 
 // ── Actions ──────────────────────────────────────────────────────
