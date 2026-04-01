@@ -22,7 +22,33 @@ impl ksni::Tray for TrayIcon {
     }
 
     fn icon_name(&self) -> String {
-        "camera-photo".into()
+        String::new()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        // 24x24 camera emoji icon (ARGB premultiplied, big-endian per SNI spec)
+        let size = 24i32;
+        let mut data = vec![0u8; (size * size * 4) as usize];
+        let set = |data: &mut Vec<u8>, x: i32, y: i32, r: u8, g: u8, b: u8| {
+            if x >= 0 && x < size && y >= 0 && y < size {
+                let i = ((y * size + x) * 4) as usize;
+                data[i] = 255; data[i+1] = r; data[i+2] = g; data[i+3] = b;
+            }
+        };
+        // Camera body (white rounded rect)
+        for y in 8..20 { for x in 3..21 { set(&mut data, x, y, 220, 220, 230); } }
+        // Viewfinder bump
+        for y in 6..9 { for x in 8..14 { set(&mut data, x, y, 200, 200, 210); } }
+        // Lens (dark circle)
+        let cx = 12.0f64; let cy = 14.0;
+        for y in 8..20 { for x in 3..21 {
+            let dx = x as f64 - cx; let dy = y as f64 - cy;
+            let d = (dx*dx + dy*dy).sqrt();
+            if d < 4.5 { set(&mut data, x, y, 60, 60, 70); }
+            if d < 3.2 { set(&mut data, x, y, 100, 160, 220); }
+            if d < 1.5 { set(&mut data, x, y, 180, 210, 240); }
+        }}
+        vec![ksni::Icon { width: size, height: size, data }]
     }
 
     fn title(&self) -> String {

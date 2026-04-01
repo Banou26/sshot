@@ -313,7 +313,17 @@ fn main() -> Result<()> {
             tray::Action::OpenLastScreenshot => {
                 let base = Config::expand_path(&config.save.directory);
                 if let Some(latest) = find_latest_file(&base) {
-                    let _ = Command::new("xdg-open").arg(&latest).spawn();
+                    // Open file manager with the file selected (freedesktop FileManager1 D-Bus)
+                    let uri = format!("file://{}", latest.display());
+                    let _ = Command::new("dbus-send")
+                        .args([
+                            "--print-reply", "--dest=org.freedesktop.FileManager1",
+                            "/org/freedesktop/FileManager1",
+                            "org.freedesktop.FileManager1.ShowItems",
+                            &format!("array:string:{uri}"), "string:",
+                        ])
+                        .stdout(std::process::Stdio::null())
+                        .spawn();
                 } else {
                     let _ = Command::new("xdg-open").arg(&base).spawn();
                 }
