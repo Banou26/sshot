@@ -21,7 +21,7 @@
 
         postInstall = ''
           wrapProgram $out/bin/sshot \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.kdePackages.spectacle pkgs.wl-clipboard ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.grim pkgs.wl-clipboard ]}
         '';
 
         meta.mainProgram = "sshot";
@@ -45,18 +45,11 @@
               window_border_color = cfg.windowBorderColor;
               region_border_color = cfg.regionBorderColor;
             };
-            shortcut = cfg.shortcut;
           };
         in
         {
           options.programs.sshot = {
             enable = lib.mkEnableOption "sshot screenshot tool";
-
-            shortcut = lib.mkOption {
-              type = lib.types.str;
-              default = "Print";
-              description = "Global shortcut key (e.g. 'Print', 'Ctrl+Shift+4', 'Meta+Shift+S')";
-            };
 
             saveDirectory = lib.mkOption {
               type = lib.types.str;
@@ -120,7 +113,6 @@
               Name=sshot
               Exec=sshot --daemon
               Type=Application
-              X-KDE-autostart-phase=2
             '';
           };
         };

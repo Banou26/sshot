@@ -1,6 +1,5 @@
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
@@ -34,7 +33,7 @@ const DRAG_THRESHOLD: f64 = 5.0;
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
     pub title: String,
-    pub internal_id: String,
+    pub id: String,
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -43,7 +42,7 @@ pub struct WindowInfo {
 
 #[derive(Debug, Clone)]
 pub enum Selection {
-    Window { x: f64, y: f64, w: f64, h: f64, title: String },
+    Window { title: String, id: String },
     Region { x: f64, y: f64, w: f64, h: f64 },
 }
 
@@ -57,8 +56,6 @@ pub struct CaptureResult {
     pub selection: Selection,
     /// Scale factor (physical / logical).
     pub scale: f64,
-    /// All windows in stacking order (bottom to top).
-    pub windows: Vec<WindowInfo>,
 }
 
 // ── Internal types ───────────────────────────────────────────────
@@ -75,8 +72,6 @@ struct OutputSurface {
     phys_w: u32,
     phys_h: u32,
     scale: f64,
-    ss_offset_x: u32,
-    ss_offset_y: u32,
     normal: Vec<u8>,
     dimmed: Vec<u8>,
     configured: bool,
@@ -84,52 +79,154 @@ struct OutputSurface {
     frame_pending: bool,
 }
 
-// ── Capture ──────────────────────────────────────────────────────
+// ── Window list via Niri IPC ────────────────────────────────────
 
-fn get_windows() -> Result<Vec<WindowInfo>> {
-    let token = format!("WD{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
-    let script = format!(
-        r#"var out = [];
-var wins = workspace.stackingOrder;
-for (var i = 0; i < wins.length; i++) {{
-    var w = wins[i];
-    if (!w.minimized && w.normalWindow) {{
-        var g = w.frameGeometry;
-        out.push(JSON.stringify({{t: w.caption, id: w.internalId.toString(), x: g.x, y: g.y, w: g.width, h: g.height}}));
-    }}
-}}
-console.log("{token}:[" + out.join(",") + "]");"#
-    );
-    let script_path = std::env::temp_dir().join(format!("kwin_ss_{token}.js"));
-    std::fs::write(&script_path, &script)?;
-    let script_name = format!("ss_{token}");
+fn get_windows(gap: f64, ring: f64) -> Result<Vec<WindowInfo>> {
+    let win_out = Command::new("niri").args(["msg", "--json", "windows"]).output()
+        .context("niri msg windows failed")?;
+    if !win_out.status.success() { return Ok(Vec::new()); }
+    let windows: Vec<serde_json::Value> = serde_json::from_slice(&win_out.stdout)?;
 
-    let load_out = Command::new("qdbus")
-        .args(["org.kde.KWin", "/Scripting", "loadScript", script_path.to_str().unwrap(), &script_name])
-        .output().context("Failed to run qdbus")?;
-    let sid = String::from_utf8_lossy(&load_out.stdout).trim().to_string();
-    let _ = Command::new("qdbus").args(["org.kde.KWin", &format!("/Scripting/Script{sid}"), "run"]).output();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let journal = Command::new("journalctl")
-        .args(["--user", "-t", "kwin_wayland", "-n", "50", "--output=cat", "--no-pager", "--since", "-5s"])
-        .output().context("journalctl failed")?;
-    let _ = Command::new("qdbus").args(["org.kde.KWin", &format!("/Scripting/Script{sid}"), "stop"]).output();
-    let _ = Command::new("qdbus").args(["org.kde.KWin", "/Scripting", "unloadScript", &script_name]).output();
-    let _ = std::fs::remove_file(&script_path);
+    let ws_out = Command::new("niri").args(["msg", "--json", "workspaces"]).output()
+        .context("niri msg workspaces failed")?;
+    let workspaces: Vec<serde_json::Value> = serde_json::from_slice(&ws_out.stdout)?;
 
-    let stdout = String::from_utf8_lossy(&journal.stdout);
-    for line in stdout.lines() {
-        if let Some(json_str) = line.split(&format!("{token}:")).nth(1) {
-            let arr: Vec<serde_json::Value> = serde_json::from_str(json_str.trim())?;
-            return Ok(arr.iter().map(|item| WindowInfo {
-                title: item["t"].as_str().unwrap_or("").to_string(),
-                internal_id: item["id"].as_str().unwrap_or("").to_string(),
-                x: item["x"].as_f64().unwrap_or(0.0), y: item["y"].as_f64().unwrap_or(0.0),
-                width: item["w"].as_f64().unwrap_or(0.0), height: item["h"].as_f64().unwrap_or(0.0),
-            }).collect());
+    let out_out = Command::new("niri").args(["msg", "--json", "outputs"]).output()
+        .context("niri msg outputs failed")?;
+    let outputs: HashMap<String, serde_json::Value> = serde_json::from_slice(&out_out.stdout)?;
+
+    // Map active workspace → output logical rect
+    let mut ws_output: HashMap<u64, (f64, f64, f64, f64)> = HashMap::new();
+    for ws in &workspaces {
+        if !ws["is_active"].as_bool().unwrap_or(false) { continue; }
+        let ws_id = ws["id"].as_u64().unwrap_or(0);
+        let out_name = ws["output"].as_str().unwrap_or("");
+        if let Some(out) = outputs.get(out_name) {
+            let l = &out["logical"];
+            ws_output.insert(ws_id, (
+                l["x"].as_f64().unwrap_or(0.0),
+                l["y"].as_f64().unwrap_or(0.0),
+                l["width"].as_f64().unwrap_or(0.0),
+                l["height"].as_f64().unwrap_or(0.0),
+            ));
         }
     }
-    Ok(Vec::new())
+
+    // Only keep windows on active workspaces
+    let mut by_ws: HashMap<u64, Vec<&serde_json::Value>> = HashMap::new();
+    for w in &windows {
+        let ws_id = w["workspace_id"].as_u64().unwrap_or(0);
+        if ws_output.contains_key(&ws_id) {
+            by_ws.entry(ws_id).or_default().push(w);
+        }
+    }
+
+    let mut result = Vec::new();
+
+    for (ws_id, wins) in &by_ws {
+        let (ox, oy, ow, oh) = ws_output[ws_id];
+
+        // Floating windows: use tile_pos_in_workspace_view (always populated for floats)
+        for w in wins.iter().filter(|w| w["is_floating"].as_bool().unwrap_or(false)) {
+            let layout = &w["layout"];
+            let pos = &layout["tile_pos_in_workspace_view"];
+            if pos.is_null() { continue; }
+            let off_x = layout["window_offset_in_tile"][0].as_f64().unwrap_or(0.0);
+            let off_y = layout["window_offset_in_tile"][1].as_f64().unwrap_or(0.0);
+            let size = &layout["window_size"];
+            result.push(WindowInfo {
+                title: w["title"].as_str().unwrap_or("").to_string(),
+                id: w["id"].as_u64().unwrap_or(0).to_string(),
+                x: ox + pos[0].as_f64().unwrap_or(0.0) + off_x,
+                y: oy + pos[1].as_f64().unwrap_or(0.0) + off_y,
+                width: size[0].as_f64().unwrap_or(0.0),
+                height: size[1].as_f64().unwrap_or(0.0),
+            });
+        }
+
+        // Tiled windows: reconstruct positions from scrolling layout
+        let mut columns: BTreeMap<u64, Vec<&serde_json::Value>> = BTreeMap::new();
+        for w in wins.iter().filter(|w| !w["is_floating"].as_bool().unwrap_or(false)) {
+            let col = w["layout"]["pos_in_scrolling_layout"][0].as_u64().unwrap_or(0);
+            columns.entry(col).or_default().push(w);
+        }
+        if columns.is_empty() { continue; }
+        for col in columns.values_mut() {
+            col.sort_by_key(|w| w["layout"]["pos_in_scrolling_layout"][1].as_u64().unwrap_or(0));
+        }
+
+        let col_data: Vec<(u64, f64, Vec<(f64, &serde_json::Value)>)> = columns.iter().map(|(&col_idx, col)| {
+            let width = col.iter()
+                .map(|w| w["layout"]["tile_size"][0].as_f64().unwrap_or(0.0))
+                .fold(0.0f64, f64::max);
+            let rows: Vec<_> = col.iter()
+                .map(|w| (w["layout"]["tile_size"][1].as_f64().unwrap_or(0.0), *w))
+                .collect();
+            (col_idx, width, rows)
+        }).collect();
+
+        // The visual gap between tile content = gap - 2*ring (focus ring eats
+        // into the gap on each side). Use this for inter-tile spacing.
+        let visual_gap = (gap - 2.0 * ring).max(0.0);
+
+        // Compute column positions using the visual gap
+        let mut col_scroll_x: Vec<f64> = Vec::new();
+        let mut sx = 0.0;
+        for (i, (_, col_w, _)) in col_data.iter().enumerate() {
+            col_scroll_x.push(sx);
+            sx += col_w;
+            if i + 1 < col_data.len() { sx += visual_gap; }
+        }
+        let total_scroll_w = sx;
+
+        let scroll_offset = if total_scroll_w <= ow {
+            -(ow - total_scroll_w) / 2.0
+        } else {
+            let focused_col_idx = wins.iter()
+                .find(|w| w["is_focused"].as_bool().unwrap_or(false))
+                .and_then(|w| w["layout"]["pos_in_scrolling_layout"][0].as_u64());
+            let focused_local = focused_col_idx
+                .and_then(|idx| col_data.iter().position(|(ci, _, _)| *ci == idx))
+                .unwrap_or(0);
+            let fx = col_scroll_x[focused_local];
+            let fw = col_data[focused_local].1;
+            (fx + fw / 2.0 - ow / 2.0).max(0.0).min(total_scroll_w - ow)
+        };
+
+        // Infer vertical offset (bar/panel height) from tallest column.
+        let max_used_h = col_data.iter().map(|(_, _, rows)| {
+            let h: f64 = rows.iter().map(|(th, _)| *th).sum();
+            h + rows.len().saturating_sub(1) as f64 * gap
+        }).fold(0.0f64, f64::max);
+        let bar_h = (oh - max_used_h).max(0.0);
+
+        for (i, (_, _col_w, rows)) in col_data.iter().enumerate() {
+            let screen_x = ox + col_scroll_x[i] - scroll_offset;
+            let mut screen_y = oy + bar_h;
+            for (tile_h, w) in rows {
+                let layout = &w["layout"];
+                let win_w = layout["window_size"][0].as_f64().unwrap_or(0.0);
+                let win_h = layout["window_size"][1].as_f64().unwrap_or(0.0);
+                let off_x = layout["window_offset_in_tile"][0].as_f64().unwrap_or(0.0);
+                let off_y = layout["window_offset_in_tile"][1].as_f64().unwrap_or(0.0);
+
+                let wx = screen_x + off_x;
+                let wy = screen_y + off_y;
+                if wx + win_w > ox && wx < ox + ow && wy + win_h > oy && wy < oy + oh {
+                    result.push(WindowInfo {
+                        title: w["title"].as_str().unwrap_or("").to_string(),
+                        id: w["id"].as_u64().unwrap_or(0).to_string(),
+                        x: wx, y: wy,
+                        width: win_w, height: win_h,
+                    });
+                }
+
+                screen_y += tile_h + visual_gap;
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 // ── Rendering ────────────────────────────────────────────────────
@@ -174,7 +271,6 @@ fn render(
     canvas[..len].copy_from_slice(&dimmed[..len]);
 
     if let Some((hx_raw, hy_raw, hw, hh)) = highlight {
-        // Compute hx2/hy2 from raw coords BEFORE clamping hx/hy (cross-monitor correctness)
         let hx2 = (hx_raw as i64 + hw as i64).max(0).min(width as i64) as u32;
         let hy2 = (hy_raw as i64 + hh as i64).max(0).min(height as i64) as u32;
         let hx = (hx_raw.max(0) as u32).min(width);
@@ -272,7 +368,7 @@ impl App {
             );
             layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
             layer.set_size(0, 0);
-            let kb = if self.surfaces.is_empty() { KeyboardInteractivity::Exclusive } else { KeyboardInteractivity::None };
+            let kb = KeyboardInteractivity::Exclusive;
             layer.set_keyboard_interactivity(kb);
             layer.set_exclusive_zone(-1);
             layer.commit();
@@ -289,7 +385,7 @@ impl App {
             self.surfaces.push(OutputSurface {
                 layer, wl_surface: surface, viewport, pool,
                 logical_x: log_x, logical_y: log_y, logical_w: log_w, logical_h: log_h,
-                phys_w, phys_h, scale, ss_offset_x, ss_offset_y,
+                phys_w, phys_h, scale,
                 normal, dimmed, configured: false, needs_redraw: false, frame_pending: false,
             });
         }
@@ -391,7 +487,7 @@ impl App {
             let (gx, gy) = self.mouse_global;
             if let Some(idx) = self.window_at(gx, gy) {
                 let w = &self.windows[idx];
-                self.selection = Some(Selection::Window { x: w.x, y: w.y, w: w.width, h: w.height, title: w.title.clone() });
+                self.selection = Some(Selection::Window { title: w.title.clone(), id: w.id.clone() });
             }
         }
         self.exit = true;
@@ -538,12 +634,14 @@ delegate_registry!(App);
 
 /// Run the screenshot overlay. Returns a CaptureResult if the user made a selection.
 pub fn run(config: &Config) -> Result<Option<CaptureResult>> {
-    let win_handle = std::thread::spawn(get_windows);
+    let gap = config.appearance.tiling_gap as f64;
+    let ring = config.appearance.focus_ring_width as f64;
+    let win_handle = std::thread::spawn(move || get_windows(gap, ring));
     let (ss_data, ss_width, _ss_height, ss_stride) =
         crate::capture::capture_workspace().context("Failed to capture screenshot")?;
     let windows = win_handle.join()
         .map_err(|_| anyhow::anyhow!("Window list thread panicked"))?
-        .context("Failed to get window list")?;
+        .unwrap_or_else(|e| { eprintln!("Warning: window detection failed: {e}"); Vec::new() });
 
     let conn = Connection::connect_to_env().context("No Wayland connection")?;
     let (globals, mut event_queue) = registry_queue_init(&conn)?;
@@ -581,7 +679,7 @@ pub fn run(config: &Config) -> Result<Option<CaptureResult>> {
     match app.selection {
         Some(sel) => Ok(Some(CaptureResult {
             ss_data: app.ss_data, ss_width: app.ss_width, ss_stride: app.ss_stride,
-            selection: sel, scale: app.global_scale, windows: app.windows,
+            selection: sel, scale: app.global_scale,
         })),
         None => Ok(None),
     }

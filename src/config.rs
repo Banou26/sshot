@@ -8,13 +8,6 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub save: SaveConfig,
     pub appearance: AppearanceConfig,
-    /// Global shortcut key (e.g. "Print", "Meta+Shift+S"). Empty to disable.
-    #[serde(default = "default_shortcut")]
-    pub shortcut: String,
-}
-
-fn default_shortcut() -> String {
-    "Print".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +32,10 @@ pub struct AppearanceConfig {
     pub border_width: u32,
     pub window_border_color: [u8; 3],
     pub region_border_color: [u8; 3],
+    /// Gap between windows in the tiling layout (should match niri's `gaps` setting).
+    pub tiling_gap: u32,
+    /// Focus ring width (should match niri's `focus-ring { width }` setting).
+    pub focus_ring_width: u32,
 }
 
 impl Default for Config {
@@ -46,7 +43,6 @@ impl Default for Config {
         Self {
             save: SaveConfig::default(),
             appearance: AppearanceConfig::default(),
-            shortcut: default_shortcut(),
         }
     }
 }
@@ -70,6 +66,8 @@ impl Default for AppearanceConfig {
             border_width: 3,
             window_border_color: [80, 140, 255],
             region_border_color: [255, 255, 255],
+            tiling_gap: 16,
+            focus_ring_width: 4,
         }
     }
 }
