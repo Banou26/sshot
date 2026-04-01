@@ -81,7 +81,42 @@ struct OutputSurface {
 
 // ── Window list via Niri IPC ────────────────────────────────────
 
-fn get_windows(gap: f64, ring: f64) -> Result<Vec<WindowInfo>> {
+/// Detect the top bar/panel height on an output by scanning for the darkest
+/// horizontal band in the screenshot (the gap between bar and first window).
+fn detect_top_bar(ss_data: &[u8], ss_stride: u32, ss_width: u32, phys_x: u32, phys_y: u32, phys_w: u32, scale: f64) -> f64 {
+    let sample_x = phys_x + phys_w / 4;
+    let max_scan = (200.0 * scale) as u32;
+    let mut min_bright: u32 = u32::MAX;
+    let mut min_y = phys_y;
+
+    // Find the darkest row in the top portion (the gap below the bar)
+    for y in phys_y..phys_y + max_scan {
+        let si = (y * ss_stride + sample_x * 4) as usize;
+        if si + 3 >= ss_data.len() { break; }
+        let bright = ss_data[si] as u32 + ss_data[si + 1] as u32 + ss_data[si + 2] as u32;
+        if bright < min_bright {
+            min_bright = bright;
+            min_y = y;
+        }
+    }
+
+    // Scan forward from the dark band to find where window content starts
+    // (brightness increases and stabilizes)
+    let mut window_start = min_y;
+    for y in min_y..phys_y + max_scan {
+        let si = (y * ss_stride + sample_x * 4) as usize;
+        if si + 3 >= ss_data.len() { break; }
+        let bright = ss_data[si] as u32 + ss_data[si + 1] as u32 + ss_data[si + 2] as u32;
+        if bright > min_bright + 60 {
+            window_start = y;
+            break;
+        }
+    }
+
+    (window_start - phys_y) as f64 / scale
+}
+
+fn get_windows(gap: f64, ring: f64, ss_data: &[u8], ss_stride: u32, ss_width: u32) -> Result<Vec<WindowInfo>> {
     let win_out = Command::new("niri").args(["msg", "--json", "windows"]).output()
         .context("niri msg windows failed")?;
     if !win_out.status.success() { return Ok(Vec::new()); }
@@ -95,8 +130,8 @@ fn get_windows(gap: f64, ring: f64) -> Result<Vec<WindowInfo>> {
         .context("niri msg outputs failed")?;
     let outputs: HashMap<String, serde_json::Value> = serde_json::from_slice(&out_out.stdout)?;
 
-    // Map active workspace → output logical rect
-    let mut ws_output: HashMap<u64, (f64, f64, f64, f64)> = HashMap::new();
+    // Map active workspace → output logical rect + scale
+    let mut ws_output: HashMap<u64, (f64, f64, f64, f64, f64)> = HashMap::new();
     for ws in &workspaces {
         if !ws["is_active"].as_bool().unwrap_or(false) { continue; }
         let ws_id = ws["id"].as_u64().unwrap_or(0);
@@ -108,6 +143,7 @@ fn get_windows(gap: f64, ring: f64) -> Result<Vec<WindowInfo>> {
                 l["y"].as_f64().unwrap_or(0.0),
                 l["width"].as_f64().unwrap_or(0.0),
                 l["height"].as_f64().unwrap_or(0.0),
+                l["scale"].as_f64().unwrap_or(1.5),
             ));
         }
     }
@@ -124,7 +160,7 @@ fn get_windows(gap: f64, ring: f64) -> Result<Vec<WindowInfo>> {
     let mut result = Vec::new();
 
     for (ws_id, wins) in &by_ws {
-        let (ox, oy, ow, oh) = ws_output[ws_id];
+        let (ox, oy, ow, oh, scale) = ws_output[ws_id];
 
         // Floating windows: use tile_pos_in_workspace_view (always populated for floats)
         for w in wins.iter().filter(|w| w["is_floating"].as_bool().unwrap_or(false)) {
@@ -193,12 +229,12 @@ fn get_windows(gap: f64, ring: f64) -> Result<Vec<WindowInfo>> {
             (fx + fw / 2.0 - ow / 2.0).max(0.0).min(total_scroll_w - ow)
         };
 
-        // Infer vertical offset (bar/panel height) from tallest column.
-        let max_used_h = col_data.iter().map(|(_, _, rows)| {
-            let h: f64 = rows.iter().map(|(th, _)| *th).sum();
-            h + rows.len().saturating_sub(1) as f64 * gap
-        }).fold(0.0f64, f64::max);
-        let bar_h = (oh - max_used_h).max(0.0);
+        // Detect the actual top bar height from the screenshot pixels.
+        // This correctly handles both top bars and bottom docks.
+        let phys_x = (ox * scale).round() as u32;
+        let phys_y = (oy * scale).round() as u32;
+        let phys_w = (ow * scale).round() as u32;
+        let bar_h = detect_top_bar(ss_data, ss_stride, ss_width, phys_x, phys_y, phys_w, scale);
 
         for (i, (_, _col_w, rows)) in col_data.iter().enumerate() {
             let screen_x = ox + col_scroll_x[i] - scroll_offset;
@@ -636,11 +672,9 @@ delegate_registry!(App);
 pub fn run(config: &Config) -> Result<Option<CaptureResult>> {
     let gap = config.appearance.tiling_gap as f64;
     let ring = config.appearance.focus_ring_width as f64;
-    let win_handle = std::thread::spawn(move || get_windows(gap, ring));
     let (ss_data, ss_width, _ss_height, ss_stride) =
         crate::capture::capture_workspace().context("Failed to capture screenshot")?;
-    let windows = win_handle.join()
-        .map_err(|_| anyhow::anyhow!("Window list thread panicked"))?
+    let windows = get_windows(gap, ring, &ss_data, ss_stride, ss_width)
         .unwrap_or_else(|e| { eprintln!("Warning: window detection failed: {e}"); Vec::new() });
 
     let conn = Connection::connect_to_env().context("No Wayland connection")?;
