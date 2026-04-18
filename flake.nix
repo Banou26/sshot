@@ -107,13 +107,6 @@
               source = configFile;
               force = true;
             };
-
-            xdg.configFile."autostart/sshot.desktop".text = ''
-              [Desktop Entry]
-              Name=sshot
-              Exec=sshot --daemon
-              Type=Application
-            '';
           };
         };
     };

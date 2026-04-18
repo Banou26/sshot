@@ -114,10 +114,30 @@ impl ksni::Tray for TrayIcon {
 }
 
 /// Spawn the tray icon in a background thread. Returns immediately.
-pub fn spawn(sender: Sender<Action>) -> Result<(), ksni::Error> {
-    let icon = TrayIcon { sender };
-    let _handle = icon.spawn()?;
-    // handle is leaked intentionally — tray lives until process exits
-    std::mem::forget(_handle);
-    Ok(())
+///
+/// Registration retries in the background because StatusNotifierWatcher may
+/// not be on the bus yet when the daemon starts (e.g. the shell's tray host
+/// hasn't come up). Compositor startup order is not something we can rely on.
+pub fn spawn(sender: Sender<Action>) {
+    std::thread::spawn(move || {
+        for attempt in 1u32..=60 {
+            let icon = TrayIcon { sender: sender.clone() };
+            match icon.spawn() {
+                Ok(handle) => {
+                    if attempt > 1 {
+                        eprintln!("tray: registered on attempt {attempt}");
+                    }
+                    // handle is leaked intentionally — tray lives until process exits
+                    std::mem::forget(handle);
+                    return;
+                }
+                Err(e) if attempt == 1 || attempt.is_power_of_two() => {
+                    eprintln!("tray: register failed (attempt {attempt}): {e}");
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        eprintln!("tray: giving up after 60 attempts — no StatusNotifierWatcher");
+    });
 }

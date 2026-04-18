@@ -168,6 +168,11 @@ fn remove_pid() {
     let _ = std::fs::remove_file(pid_path());
 }
 
+/// Check if a process with the given PID is alive (sends signal 0).
+fn is_process_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
 // ── Actions ──────────────────────────────────────────────────────
 
 fn take_screenshot(config: &Config) {
@@ -277,6 +282,16 @@ fn main() -> Result<()> {
     }
 
     // ── Daemon mode ──────────────────────────────────────────────
+    // Single-instance check: if another daemon is already running, exit.
+    if let Some(existing) = read_pid() {
+        if is_process_alive(existing) {
+            eprintln!("sshot daemon already running (pid {existing}), exiting.");
+            return Ok(());
+        }
+        // Stale PID file — remove and continue
+        remove_pid();
+    }
+
     let mut config = Config::load();
     eprintln!("Screenshot daemon starting. Config: {}", Config::config_path().display());
 
@@ -284,10 +299,8 @@ fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::channel::<tray::Action>();
 
-    // System tray (background thread via ksni)
-    if let Err(e) = tray::spawn(tx.clone()) {
-        eprintln!("Warning: tray icon failed: {e}");
-    }
+    // System tray (background thread via ksni; retries until the watcher is up)
+    tray::spawn(tx.clone());
 
     // Signal handler (background thread)
     let sig_tx = tx.clone();
@@ -313,17 +326,10 @@ fn main() -> Result<()> {
             tray::Action::OpenLastScreenshot => {
                 let base = Config::expand_path(&config.save.directory);
                 if let Some(latest) = find_latest_file(&base) {
-                    // Open file manager with the file selected (freedesktop FileManager1 D-Bus)
-                    let uri = format!("file://{}", latest.display());
-                    let _ = Command::new("dbus-send")
-                        .args([
-                            "--print-reply", "--dest=org.freedesktop.FileManager1",
-                            "/org/freedesktop/FileManager1",
-                            "org.freedesktop.FileManager1.ShowItems",
-                            &format!("array:string:{uri}"), "string:",
-                        ])
-                        .stdout(std::process::Stdio::null())
-                        .spawn();
+                    // dolphin --select opens the folder with the file highlighted
+                    if Command::new("dolphin").arg("--select").arg(&latest).spawn().is_err() {
+                        let _ = Command::new("xdg-open").arg(latest.parent().unwrap_or(&base)).spawn();
+                    }
                 } else {
                     let _ = Command::new("xdg-open").arg(&base).spawn();
                 }
